@@ -25,9 +25,13 @@ Due to licensing, I will not and cannot upload the nvidia vgpu drivers, you will
 ## Script options:
 
 **-n [file]**: Points to Nvidia drivers package (.run file)
+
 **-u [folder]**: Points to unraid's linux src folder
+
 **-h**: Displays help
+
 **-s**: Skips building kernel (only used for debug purposes)
+
 **-c**: Cleans up temporary files/folder after building
 
 ## Tested versions:
