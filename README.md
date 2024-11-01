@@ -30,6 +30,10 @@ Due to licensing, I will not and cannot upload the nvidia vgpu drivers, you will
 **-s**: Skips building kernel (only used for debug purposes)
 **-c**: Cleans up temporary files/folder after building
 
+## Contribution:
+
+You may contribute to better the building script. I wrote it as quick and dirty script to build the drivers package, so it's a "works on my machine" kind of thing. If you have any way to expand, correct and fix anything with this script, please feel free to do so. I'm thinking of rewriting it in python, but with some irl stuff, it might take a wile before I get there. This script has been shared since some people wanted to use it on their own machines.
+
 ## License: 
 
 GPL-3.0
