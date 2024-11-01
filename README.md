@@ -30,6 +30,16 @@ Due to licensing, I will not and cannot upload the nvidia vgpu drivers, you will
 **-s**: Skips building kernel (only used for debug purposes)
 **-c**: Cleans up temporary files/folder after building
 
+## Tested versions:
+
+- 6.12.x (tested and working)
+- 7.x (NOT TESTED, I'm running unraid inside a vm, not as my host)
+
+## Notes:
+
+- Due to some unmet nvidia drivers deps, you might need to install `elfutil` on unraid on your own, along with other deps, please use `strace` (which you also need to install on your own) to find out which deps are needed, I haven't used nvidia vgpu drivers on unraid for a while, so I forgot which ones are needed
+- Some Docker containers might not work well on first start up with these drivers (noticed it with jellyfin, handbrake and the such), restarting the containers will fix it, I do not know why that happens.
+
 ## Contribution:
 
 You may contribute to better the building script. I wrote it as quick and dirty script to build the drivers package, so it's a "works on my machine" kind of thing. If you have any way to expand, correct and fix anything with this script, please feel free to do so. I'm thinking of rewriting it in python, but with some irl stuff, it might take a wile before I get there. This script has been shared since some people wanted to use it on their own machines.
