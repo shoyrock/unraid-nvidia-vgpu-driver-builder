@@ -1,471 +1,471 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0
 
-# A script to build Nvidia drivers for vGPU guests on Unraid.
-# Credits: midi1996, samicrusader#4026, ich777
-
 # For debugging purposes
 # set -x
 
-# --- Configuration Variables (easier to update) ---
-# Source: https://github.com/ich777/libnvidia-container
-LIBNVIDIA_CONTAINER_V="1.14.3"
-# Source: https://github.com/ich777/nvidia-container-toolkit
-CONTAINER_TOOLKIT_V="1.14.3"
-
-# --- Global Variables (set later in the script) ---
-DATA_DIR=$(pwd)
-DATA_TMP="${DATA_DIR}/tmp"
-NV_TMP_D="${DATA_TMP}/NVIDIA"
-LOG_F="${DATA_DIR}/logfile_$(date +'%Y.%m.%d')_${RANDOM}.log"
-CPU_COUNT=$(nproc)
-SKIP_KERNEL=
-CLEANUP_END=
-NV_DRV_V=""
-UNAME=""
-LNX_MAJ_NUMBER=""
-LNX_FULL_VER=""
-NV_RUN=""
-UNRAID_DIR=""
-
-######## FUNCTIONS ##########
+# Quick and (very) dirty script to make novideo drivers for vgpu guest
+# for unraid
+# Credits:midi1996
+#         samicrusader#4026
+#         ich777
+## Check if Script is running as root
 
 cleanup() {
-	echo
-	echo " [<] Cleaning up the mess..."
-	echo "  [?] Do you want to remove the temporary directory '$DATA_TMP'?"
-	read -p "  [?] Type 'y' to confirm or any other key to cancel: " clsans
-	if [[ "${clsans,,}" == "y" ]]; then
-		echo "  [!] Cleaning up..."
-		rm -rf "${DATA_TMP}" && echo "  [i] Cleaned up successfully." || { echo "  [!] Error while removing '$DATA_TMP'. Please remove it manually."; exit 1; }
-	else
-		echo "  [i] Not cleaning up. The temporary directory is located at: $DATA_TMP"
-	fi
-	echo " [i] Exiting."
-	exit 0
+    echo -ne "\r"
+    if [[ "${CLEANUP_END}" == "1" ]]; then
+        # Auto cleanup mode (no confirmation)
+        echo " [<] Auto-cleaning up temporary files..."
+        rm -rf "${DATA_TMP}" && echo " [i] Temporary build directory ${DATA_TMP} removed." \
+            || { echo "  [!] Error while removing ${DATA_TMP}. Please delete it manually."; exit 1; }
+        echo " [i] Cleanup complete. Exiting."
+        exit 0
+    fi
+    # Interactive cleanup (when not in auto-clean mode)
+    echo " [<] Cleaning up the mess..."
+    echo "  [?] Do you want to delete the temporary folder ${DATA_TMP} and remove all build files?"
+    echo "  [?] Type Y to confirm or any other key to cancel."
+    read -r clsans
+    if [[ "${clsans,,}" == "y" ]]; then
+        echo "  [!] Removing ${DATA_TMP}..."
+        rm -rf "${DATA_TMP}" && echo " [i] Cleaned up! Exiting." \
+            || { echo "  [!] Error while removing ${DATA_TMP}. Bailing out."; exit 1; }
+    else
+        echo "  [!] Not cleaning up. Exiting now."
+    fi
+    exit 0
 }
 
 files_prepare() {
-	echo
-	touch "${LOG_F}" || { echo " [!] Error creating log file."; exit 1; }
-	echo " [i] Log file created: ${LOG_F}"
-	echo " [>] Running pre-flight checks..."
-
-	# Check for Nvidia run file provided via -n flag
-	if [[ ! -f "${DATA_DIR}/${NV_RUN}" ]]; then
-		echo " [X] Nvidia driver installer not found at: ${DATA_DIR}/${NV_RUN}"
-		exit 1
-	fi
-	echo "  [✓] Nvidia installer found."
-
-	# Check for Unraid source dir provided via -u flag
-	if [[ ! -d "${DATA_DIR}/${UNRAID_DIR}" ]]; then
-		echo " [X] Unraid source directory not found at: ${DATA_DIR}/${UNRAID_DIR}"
-		exit 1
-	fi
-	echo "  [✓] Unraid source directory found."
-
-	echo "  [i] Retrieving Nvidia driver version from package..."
-	echo "  [i] This may take a moment..."
-	# Use a more robust way to capture version, but this is the standard for now.
-	NV_DRV_V=$(sh "${DATA_DIR}/${NV_RUN}" --version | grep -i 'version' | head -n1 | awk '{print $4}')
-	if [[ -z "${NV_DRV_V}" ]]; then
-		echo "  [!] Error getting Nvidia driver version. Please check the installer package."
-		exit 1
-	fi
-	echo "  [✓] Got Nvidia driver version: ${NV_DRV_V}"
-
-	local FREE_STG
-	FREE_STG=$(df -k --output=avail "$PWD" | tail -n1)
-	# Check for 7GB in KB
-	if [[ "${FREE_STG}" -lt $((7 * 1024 * 1024)) ]]; then
-		echo "  [!] Not enough disk space. At least 7GB of free space is required in the current directory."
-		exit 1
-	fi
-	echo "  [✓] Enough free space on disk."
-
-	if wget -q --spider https://kernel.org; then
-		echo "  [✓] Internet connection is available."
-	else
-		echo "  [!] Internet connection is unavailable. Cannot download kernel source."
-		exit 1
-	fi
-	echo ""
-
-	echo " [>] Preparing folder structure..."
-	if [[ -z "${SKIP_KERNEL}" ]] && [[ -d "${DATA_TMP}" ]]; then
-		echo " [!] An old temporary folder was found: '${DATA_TMP}'"
-		read -p "  [?] Do you want to delete it and start fresh? (y/n): " ans
-		if [[ "${ans,,}" == "y" ]]; then
-			echo "  [>] Deleting old temporary folder..."
-			rm -rf "${DATA_TMP}" || { echo "   [!] Error deleting the folder. Please remove it manually."; exit 1; }
-			echo "  [✓] Old folder deleted."
-		else
-			echo " [!] Using the old temporary folder. This may cause unexpected issues."
-		fi
-	fi
-
-	mkdir -p "${DATA_TMP}" \
-		"${NV_TMP_D}/usr/lib64/xorg/modules/"{drivers,extensions} \
-		"${NV_TMP_D}/usr/bin" \
-		"${NV_TMP_D}/etc" \
-		"${NV_TMP_D}/lib/modules/${UNAME}/kernel/drivers/video" \
-		"${NV_TMP_D}/lib/firmware" || { echo "  [!] Error creating destination directories."; exit 1; }
-
-	echo " [✓] Folder structure created."
-	echo " [✓] Preparation complete."
-	echo
+    echo
+    # Create log file
+    touch "${LOG_F}" || { echo " [!] Error creating log file ${LOG_F}."; exit 1; }
+    echo " [i] Log file created: ${LOG_F}"
+    echo " [>] Running preliminary checks..."
+    # If NV_RUN provided, get driver version for naming
+    if [[ -n "${NV_RUN}" ]]; then
+        echo "  [i] Determining NVIDIA driver version from package..."
+        echo "  [i] This may take a moment, please wait."
+        NV_DRV_V=$(sh "${DATA_DIR}/${NV_RUN}" --version 2>/dev/null | grep -i "version" | cut -d " " -f4)
+        if [[ -z "${NV_DRV_V}" ]]; then
+            echo "  [!] Error: Could not retrieve NVIDIA driver version from ${NV_RUN}. Please check the package or verify it with '--version'."
+            exit 1
+        fi
+        echo "  [✓] NVIDIA driver version: ${NV_DRV_V}"
+    fi
+    # Check disk space (require ~7GB free)
+    FREE_STG=$(df -k --output=avail "$PWD" | tail -n1)
+    if [[ "${FREE_STG}" -lt $((7*1024*1024)) ]]; then
+        echo "  [!] Not enough disk space. Ensure at least 7 GB is free."
+        exit 1
+    else
+        echo " [✓] Sufficient disk space available."
+    fi
+    # Check internet connectivity (needed for kernel and package downloads)
+    if wget -q --spider https://kernel.org; then
+        echo " [✓] Internet connection: OK"
+    else
+        echo " [!] Internet connection unavailable. Please check your network."
+        exit 1
+    fi
+    echo ""
+    echo " [>] Preparing folder structure..."
+    if [[ -z "${SKIP_KERNEL}" && -d "${DATA_TMP}" ]]; then
+        echo " [!] Found an existing temporary build directory."
+        echo "  [?] Do you want to delete the old temporary folder 'tmp' and start fresh?"
+        echo "  [?] Enter 1 for Yes or 2 for No."
+        select ans in "Yes" "No"; do
+            case $ans in
+                Yes )
+                    echo "  [>] Removing old temporary folder..."
+                    rm -rf "${DATA_TMP}" || { echo "   [!] Error deleting old temporary folder. Please remove it manually."; exit 1; }
+                    echo " [✓] Old temporary folder deleted."
+                    break
+                    ;;
+                No )
+                    echo " [!] Reusing existing 'tmp' folder. (This may cause errors if contents are stale.)"
+                    break
+                    ;;
+            esac
+        done
+    fi
+    mkdir -p "${DATA_TMP}" || { echo "  [!] Error creating base temp directory ${DATA_TMP}."; exit 1; }
+    mkdir -p "${NV_TMP_D}/usr/lib64/xorg/modules/drivers" \
+             "${NV_TMP_D}/usr/lib64/xorg/modules/extensions" \
+             "${NV_TMP_D}/usr/bin" \
+             "${NV_TMP_D}/etc" \
+             "${NV_TMP_D}/lib/modules/${UNAME%/}/kernel/drivers/video" \
+             "${NV_TMP_D}/lib/firmware" || { echo "  [!] Error creating NVIDIA package directory structure."; exit 1; }
+    echo " [✓] Temporary folders created."
+    echo " [✓] Preliminary setup done."
+    echo
 }
 
 build_kernel() {
-	echo " [>] Building kernel source for '${LNX_FULL_VER}'..."
-	echo "  [>] Downloading Linux ${LNX_FULL_VER} source..."
-	cd "${DATA_TMP}" || exit 1
-	wget -q -nc -4c --show-progress --progress=bar:force:noscroll https://mirrors.edge.kernel.org/pub/linux/kernel/v"${LNX_MAJ_NUMBER}".x/linux-"${LNX_FULL_VER}".tar.xz || { echo "  [!] Error downloading the kernel source."; exit 1; }
-
-	echo "  [>] Extracting the kernel source..."
-	tar xf "./linux-${LNX_FULL_VER}.tar.xz" || { echo "  [!] Error extracting the kernel source."; exit 1; }
-	cd "./linux-${LNX_FULL_VER}" || { echo "  [!] Error changing to the kernel source directory."; exit 1; }
-	echo "   [✓] Extracted kernel source ${LNX_FULL_VER}."
-
-	echo "  [>] Applying Unraid patches..."
-	# Copy Unraid source to a temporary location to avoid modifying original
-	local TEMP_UNRAID_SRC="${DATA_TMP}/unraid_src_temp"
-	cp -r "${DATA_DIR}/${UNRAID_DIR}" "${TEMP_UNRAID_SRC}"
-	find "${TEMP_UNRAID_SRC}" -type f -name '*.patch' -exec patch -p1 -i {} \; -delete >>"${LOG_F}" 2>&1 || { echo "  [!] Failed to apply Unraid patches. Check log for details."; exit 1; }
-	echo "   [✓] Applied Unraid patches to the kernel source."
-	rm -rf "${TEMP_UNRAID_SRC}"
-
-	echo "  [>] Merging Unraid config and files..."
-	cp "${DATA_DIR}/${UNRAID_DIR}/.config" . || { echo "  [!] Couldn't find .config file in your Unraid source folder."; exit 1; }
-	cp -r "${DATA_DIR}/${UNRAID_DIR}/drivers/md/." "drivers/md/" || { echo "  [!] Couldn't find drivers/md folder in your Unraid source folder."; exit 1; }
-	echo "   [✓] Merged Unraid config and files."
-
-	echo "  [>] Building the kernel (this will take a long time)..."
-	echo "   [i] Output is being logged to: ${LOG_F}"
-	make -j"${CPU_COUNT}" olddefconfig >>"${LOG_F}" 2>&1
-	make -j"${CPU_COUNT}" >>"${LOG_F}" 2>&1 || { echo -e "\n  [!] Error building the kernel.\n  [!] Please check ${LOG_F} for details.\n"; exit 1; }
-	make -j"${CPU_COUNT}" modules >>"${LOG_F}" 2>&1 || { echo -e "\n  [!] Error building the kernel modules.\n  [!] Please check ${LOG_F} for details.\n"; exit 1; }
-	echo " [✓] Kernel build complete."
-	echo
+    echo " [>] Building the Unraid kernel..."
+    echo "  [>] Downloading Linux kernel source ${LNX_FULL_VER}..."
+    cd "${DATA_TMP}" || { echo "  [!] Error: Could not enter temp directory ${DATA_TMP}."; exit 1; }
+    wget -q -nc -4c --show-progress --progress=bar:force:noscroll "https://mirrors.edge.kernel.org/pub/linux/kernel/v${LNX_MAJ_NUMBER}.x/linux-${LNX_FULL_VER}.tar.xz" \
+        || { echo "  [!] Error downloading Linux kernel source tarball."; exit 1; }
+    echo "  [>] Extracting kernel source archive..."
+    tar -xf "linux-${LNX_FULL_VER}.tar.xz" || { echo "  [!] Error extracting linux-${LNX_FULL_VER}.tar.xz"; exit 1; }
+    cd "linux-${LNX_FULL_VER}" || { echo "  [!] Error entering linux-${LNX_FULL_VER} source directory"; exit 1; }
+    echo "   [✓] Kernel source ${LNX_FULL_VER} extracted."
+    echo "  [>] Applying Unraid patches to kernel..."
+    cp -r "${DATA_DIR}/${UNRAID_DIR}" "${DATA_TMP}/${UNAME%/}" || { echo "  [!] Unraid source folder not found at ${DATA_DIR}/${UNRAID_DIR}"; exit 1; }
+    find "${DATA_TMP}/${UNAME%/}" -type f -name '*.patch' -exec patch -p1 -i {} \; -delete >> "${LOG_F}" 2>&1 \
+        || { echo "  [!] Failed to apply Unraid kernel patches. See ${LOG_F} for details."; exit 1; }
+    echo "   [✓] Unraid patches applied."
+    echo "  [>] Merging Unraid configuration and files..."
+    cp "${DATA_TMP}/${UNAME%/}/.config" . || { echo "  [!] .config not found in Unraid source folder. Exiting."; exit 1; }
+    cp -r "${DATA_TMP}/${UNAME%/}/drivers/md"/* drivers/md/ 2>/dev/null || { echo "  [!] Unraid 'drivers/md' folder not found or empty. Exiting."; exit 1; }
+    echo "   [✓] Unraid kernel config and files merged."
+    echo "  [>] Compiling the kernel (this may take a while)..."
+    make -j"$(nproc)" >> "${LOG_F}" 2>&1 || { echo -e "\n  [!] Kernel build failed. Check ${LOG_F} for details.\n"; exit 1; }
+    make -j"$(nproc)" modules >> "${LOG_F}" 2>&1 || { echo -e "\n  [!] Kernel modules build failed. Check ${LOG_F} for details.\n"; exit 1; }
+    echo " [✓] Kernel build complete."
+    echo
 }
 
-link_kernel_source() {
-	echo " [>] Linking compiled kernel source to /lib/modules for the Nvidia installer..."
-	mkdir -p "/lib/modules/${UNAME}"
-	# The nvidia installer looks for this symlink to find kernel headers
-	ln -sf "${DATA_TMP}/linux-${LNX_FULL_VER}" "/lib/modules/${UNAME}/build" || { echo "  [!] Error creating symlink in /lib/modules/${UNAME}."; exit 1; }
-	echo " [✓] Kernel source linked."
-	echo
+link_sauce() {
+    echo " [>] Linking built kernel source into /lib/modules..."
+    cd "${DATA_TMP}" || { echo "  [!] Error accessing temp directory ${DATA_TMP}."; exit 1; }
+    mkdir -p /lib/modules/"${UNAME%/}" || { echo "  [!] Error creating /lib/modules/${UNAME%/} directory"; exit 1; }
+    ln -sf "${DATA_TMP}/linux-${LNX_FULL_VER}" /lib/modules/"${UNAME%/}"/build || { echo "  [!] Error linking /lib/modules/${UNAME%/}/build"; exit 1; }
+    echo " [✓] Kernel source linked for module compilation."
+    echo
 }
 
-install_nvidia_driver() {
-	echo " [>] Building Nvidia drivers into staging directory: ${NV_TMP_D}"
-	cd "${DATA_DIR}" || exit 1
-	chmod +x "${DATA_DIR}/${NV_RUN}" || { echo " [!] Error setting execute permission on the installer."; exit 1; }
-
-	if [[ -f /var/log/nvidia-installer.log ]]; then
-		cat <<Q
-  [!] An existing Nvidia installation log was found on this system.
-  [i] This script will attempt to run the uninstaller first to ensure a clean state.
-  [i] This is generally safe inside a temporary VM or container.
-  [?] Press Enter to continue, or Ctrl+C to stop.
-Q
-		read -r
-		echo "  [>] Running Nvidia uninstaller for cleanup..."
-		sh "${DATA_DIR}/${NV_RUN}" --uninstall --silent >>"${LOG_F}" 2>&1
-		echo "  [i] Uninstallation command finished."
-	fi
-
-	cat <<NI
-  [i] Starting the Nvidia driver build...
-  [i] You can monitor the detailed progress by running this in another terminal:
-  [i]   tail -f /var/log/nvidia-installer.log
-  [i] The full log will also be saved to: ${LOG_F}
-NI
-
-	sh "${DATA_DIR}/${NV_RUN}" \
-		--kernel-name="${UNAME}" \
-		--no-precompiled-interface \
-		--disable-nouveau \
-		--no-x-check \
-		--no-dkms \
-		--no-nouveau-check \
-		--skip-depmod \
-		--silent \
-		--j"${CPU_COUNT}" \
-		--x-prefix="${NV_TMP_D}/usr" \
-		--x-library-path="${NV_TMP_D}/usr/lib64" \
-		--x-module-path="${NV_TMP_D}/usr/lib64/xorg/modules" \
-		--opengl-prefix="${NV_TMP_D}/usr" \
-		--installer-prefix="${NV_TMP_D}/usr" \
-		--utility-prefix="${NV_TMP_D}/usr" \
-		--documentation-prefix="${NV_TMP_D}/usr" \
-		--application-profile-path="${NV_TMP_D}/usr/share/nvidia" \
-		--proc-mount-point="${NV_TMP_D}/proc" \
-		--kernel-install-path="${NV_TMP_D}/lib/modules/${UNAME}/kernel/drivers/video" \
-		--compat32-prefix="${NV_TMP_D}/usr" \
-		--compat32-libdir=lib \
-		--install-compat32-libs >>"${LOG_F}" 2>&1 &
-	local NV_PID=$!
-
-	# Wait for installer log to be created, then tail it
-	for ((i = 0; i < 30; i++)); do
-		[[ -f /var/log/nvidia-installer.log ]] && break
-		sleep 1
-	done
-	if [[ ! -f /var/log/nvidia-installer.log ]]; then
-		echo "   [!] Nvidia installer log was not created after 30 seconds. Something is wrong."
-		kill "$NV_PID" 2>/dev/null
-		exit 1
-	fi
-	tail -F /var/log/nvidia-installer.log >>"${LOG_F}" &
-	local TAIL_PID=$!
-
-	wait "$NV_PID"
-	local NV_STATUS=$?
-	# Give tail a moment to catch up before killing it
-	sleep 1
-	kill "$TAIL_PID" 2>/dev/null
-
-	echo "  [>] Verifying Nvidia driver installation..."
-	if [[ $NV_STATUS -eq 0 ]] && grep -q "Installation of the NVIDIA Accelerated Graphics Driver for Linux-x86_64 is now complete." /var/log/nvidia-installer.log; then
-		echo "   [✓] Nvidia driver build appears to be successful."
-	else
-		echo -e '\a' # Beep
-		cat <<NQ
-  [!] The Nvidia driver build may have FAILED.
-  [!] Please check the logs carefully:
-  [!]   - /var/log/nvidia-installer.log
-  [!]   - ${LOG_F}
-NQ
-		read -p "   [?] Do you want to continue and attempt to package the (possibly broken) build? (y/n): " confirm
-		if [[ "${confirm,,}" != "y" ]]; then
-			echo "   [i] Aborting as requested."
-			exit 1
-		fi
-	fi
-	echo
+nv_inst() {
+    echo " [>] Installing NVIDIA vGPU drivers (this will take a while)..."
+    cd "${DATA_DIR}" || { echo " [!] Error: Could not access directory ${DATA_DIR}."; exit 1; }
+    chmod +x "${DATA_DIR}/${NV_RUN}" || { echo " [!] Error making NVIDIA installer executable."; exit 1; }
+    # Remove any previous extracted installer folder
+    if [ -d "$(basename "${NV_RUN}" .run)" ]; then
+        echo "  [>] Removing old NVIDIA installer directory..."
+        rm -rf "$(basename "${NV_RUN}" .run)" || { echo "  [!] Error removing old NVIDIA installer directory."; exit 1; }
+    fi
+    # Remove old installer log if exists
+    if [[ -f /var/log/nvidia-installer.log ]]; then
+        echo "  [>] Removing old NVIDIA installer log..."
+        rm -f /var/log/nvidia-installer.log || echo "  [!] Warning: could not remove old /var/log/nvidia-installer.log (continuing)."
+        cat <<WARN
+  [?] If NVIDIA drivers were previously installed on this system,
+  [?] running this script in a VM is strongly recommended to avoid conflicts.
+  [?] The script will attempt to uninstall any existing NVIDIA driver to prevent issues.
+  [?] Press Enter to continue (or Ctrl+C to abort)...
+WARN
+        read -r
+        echo "  [>] Uninstalling any existing NVIDIA driver..."
+        sh "${DATA_DIR}/${NV_RUN}" --uninstall --silent >> "${LOG_F}" 2>&1
+        echo "  [i] Uninstall step complete (check ${LOG_F} for any issues)."
+    fi
+    cat <<INST
+  [>] Launching NVIDIA driver installer...
+   [i] You can monitor progress in another terminal via:
+   [i]    tail -F /var/log/nvidia-installer.log
+   [i] The installer log is also being recorded to ${LOG_F}.
+INST
+    # Run NVIDIA installer with specific options for packaging
+    sh "${DATA_DIR}/${NV_RUN}" --kernel-name="${UNAME%/}" \
+        --no-precompiled-interface \
+        --disable-nouveau \
+        --x-prefix="${NV_TMP_D}/usr" \
+        --x-library-path="${NV_TMP_D}/usr/lib64" \
+        --x-module-path="${NV_TMP_D}/usr/lib64/xorg/modules" \
+        --opengl-prefix="${NV_TMP_D}/usr" \
+        --installer-prefix="${NV_TMP_D}/usr" \
+        --utility-prefix="${NV_TMP_D}/usr" \
+        --documentation-prefix="${NV_TMP_D}/usr" \
+        --application-profile-path="${NV_TMP_D}/usr/share/nvidia" \
+        --proc-mount-point="${NV_TMP_D}/proc" \
+        --kernel-install-path="${NV_TMP_D}/lib/modules/${UNAME%/}/kernel/drivers/video" \
+        --compat32-prefix="${NV_TMP_D}/usr" \
+        --compat32-libdir="/lib" \
+        --install-compat32-libs \
+        --no-x-check \
+        --no-dkms \
+        --no-nouveau-check \
+        --skip-depmod \
+        --silent \
+        --no-questions \
+        --ui=none \
+        --accept-license \
+        --j"${CPU_COUNT}" >> "${LOG_F}" 2>&1 &
+    NV_PID=$!
+    # Wait for installer log to appear, then tail it to log file
+    local TRY_MAX=30
+    local try_count=0
+    while [ ! -f /var/log/nvidia-installer.log ]; do
+        if [ "${try_count}" -ge "${TRY_MAX}" ]; then
+            echo "   [!] NVIDIA installer log not found after ${TRY_MAX} seconds."
+            exit 1
+        fi
+        try_count=$((try_count + 1))
+        sleep 1
+    done
+    tail -F /var/log/nvidia-installer.log >> "${LOG_F}" &
+    TAIL_PID=$!
+    wait $NV_PID
+    # Installer finished, kill the tail process
+    kill $TAIL_PID 2>/dev/null
+    echo "  [>] Verifying NVIDIA driver installation log..."
+    if grep -q "installation of the NVIDIA" /var/log/nvidia-installer.log && grep -q "is now complete" /var/log/nvidia-installer.log; then
+        echo "   [✓] NVIDIA driver installed into temporary directory successfully."
+        echo "   [i] (See /var/log/nvidia-installer.log or ${LOG_F} for details.)"
+        # Short pause to allow user to read success message
+        for (( i=5; i>0; i--)); do
+            echo -ne "   [i] Continuing in ${i} seconds...\r"
+            sleep 1
+        done
+        echo
+    else
+        echo -e '\a'
+        cat <<FAIL
+  [!] NVIDIA driver installation might have failed.
+  [i] Check /var/log/nvidia-installer.log for errors.
+  [i] The resulting package could be incomplete or broken.
+  [!] Press Ctrl+C now to abort, or press Enter to continue at your own risk.
+FAIL
+        read -r
+    fi
 }
 
-copy_extra_files() {
-	echo " [>] Copying extra driver files (OpenCL, Vulkan, firmware)..."
-	# Copy files that the installer places on the host system into our staging directory
-	copy_if_exists() {
-		if [[ -e "$1" ]]; then
-			cp -R "$1" "$2" || echo "  [!] Warning: Failed to copy '$1'."
-		fi
-	}
-
-	copy_if_exists /lib/firmware/nvidia "${NV_TMP_D}/lib/firmware/"
-	copy_if_exists /usr/bin/nvidia-modprobe "${NV_TMP_D}/usr/bin/"
-	copy_if_exists /etc/OpenCL "${NV_TMP_D}/etc/"
-	copy_if_exists /etc/vulkan "${NV_TMP_D}/etc/"
-	copy_if_exists /etc/nvidia "${NV_TMP_D}/etc/"
-	copy_if_exists /usr/lib/nvidia "${NV_TMP_D}/usr/lib/"
-	copy_if_exists /usr/share/nvidia "${NV_TMP_D}/usr/share/"
-	
-	echo " [✓] Extra file copy is done. Please check for any warnings above."
-	echo
+copy_files() {
+    echo " [>] Copying supplementary files..."
+    if [ -d /lib/firmware/nvidia ]; then
+        cp -R /lib/firmware/nvidia "${NV_TMP_D}/lib/firmware/" || echo "  [!] Warning: Failed to copy /lib/firmware/nvidia"
+    fi
+    if [ -f /usr/bin/nvidia-modprobe ]; then
+        cp /usr/bin/nvidia-modprobe "${NV_TMP_D}/usr/bin/" || echo "  [!] Warning: Failed to copy nvidia-modprobe"
+    else
+        echo "  [i] Note: /usr/bin/nvidia-modprobe not found, skipping."
+    fi
+    if [ -d /etc/OpenCL ]; then
+        cp -R /etc/OpenCL "${NV_TMP_D}/etc/" || echo "  [!] Warning: Failed to copy OpenCL configuration"
+    fi
+    if [ -d /etc/vulkan ]; then
+        cp -R /etc/vulkan "${NV_TMP_D}/etc/" || echo "  [!] Warning: Failed to copy Vulkan configuration"
+    fi
+    if [ -d /etc/nvidia ]; then
+        cp -R /etc/nvidia "${NV_TMP_D}/etc/" || echo "  [!] Warning: Failed to copy /etc/nvidia"
+    fi
+    if [ -d /usr/lib/nvidia ]; then
+        cp -R /usr/lib/nvidia "${NV_TMP_D}/usr/lib/" || echo "  [!] Warning: Failed to copy /usr/lib/nvidia"
+    fi
+    if [ -d /usr/share/nvidia ]; then
+        cp -R /usr/share/nvidia "${NV_TMP_D}/usr/share/" || echo "  [!] Warning: Failed to copy /usr/share/nvidia"
+    fi
+    echo " [✓] Supplementary files copied (where available)."
+    echo
 }
 
-
-install_container_toolkit() {
-	echo " [>] Downloading and adding Docker container support files..."
-	cd "${DATA_TMP}" || exit 1
-
-	local LIBNVIDIA_URL="https://github.com/ich777/libnvidia-container/releases/download/${LIBNVIDIA_CONTAINER_V}/libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz"
-	local TOOLKIT_URL="https://github.com/ich777/nvidia-container-toolkit/releases/download/${CONTAINER_TOOLKIT_V}/nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz"
-
-	echo "  [>] Getting libnvidia-container..."
-	wget -q -nc --show-progress --progress=bar:force:noscroll "$LIBNVIDIA_URL" || { echo "   [!] Error downloading libnvidia-container."; exit 1; }
-	tar -C "${NV_TMP_D}/" -xf "libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz" || { echo "   [!] Error extracting libnvidia-container."; exit 1; }
-
-	echo "  [>] Getting nvidia-container-toolkit..."
-	wget -q -nc --show-progress --progress=bar:force:noscroll "$TOOLKIT_URL" || { echo "   [!] Error downloading nvidia-container-toolkit."; exit 1; }
-	tar -C "${NV_TMP_D}/" -xf "nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz" || { echo "   [!] Error extracting nvidia-container-toolkit."; exit 1; }
-
-	echo " [✓] Docker container support files added."
-	echo
+libnvidia_inst() {
+    echo " [>] Adding NVIDIA container runtime files..."
+    cd "${DATA_TMP}" || { echo " [!] Error entering temp directory ${DATA_TMP}."; exit 1; }
+    # Download and extract libnvidia-container package if not already present
+    if [ ! -f "${DATA_TMP}/libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz" ]; then
+        echo "  [>] Downloading libnvidia-container v${LIBNVIDIA_CONTAINER_V}..."
+        wget -q -nc --show-progress --progress=bar:force:noscroll -O "${DATA_TMP}/libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz" \
+            "https://github.com/ich777/libnvidia-container/releases/download/${LIBNVIDIA_CONTAINER_V}/libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz" \
+            || { echo "  [!] Error downloading libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz"; exit 1; }
+    fi
+    tar -C "${NV_TMP_D}/" -xf "${DATA_TMP}/libnvidia-container-v${LIBNVIDIA_CONTAINER_V}.tar.gz" \
+        || { echo "  [!] Error extracting libnvidia-container package"; exit 1; }
+    # Download and extract nvidia-container-toolkit package if not present
+    if [ ! -f "${DATA_TMP}/nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz" ]; then
+        echo "  [>] Downloading nvidia-container-toolkit v${CONTAINER_TOOLKIT_V}..."
+        wget -q -nc --show-progress --progress=bar:force:noscroll -O "${DATA_TMP}/nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz" \
+            "https://github.com/ich777/nvidia-container-toolkit/releases/download/${CONTAINER_TOOLKIT_V}/nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz" \
+            || { echo "  [!] Error downloading nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz"; exit 1; }
+    fi
+    tar -C "${NV_TMP_D}/" -xf "${DATA_TMP}/nvidia-container-toolkit-v${CONTAINER_TOOLKIT_V}.tar.gz" \
+        || { echo "  [!] Error extracting nvidia-container-toolkit package"; exit 1; }
+    echo " [✓] NVIDIA container runtime files added."
+    echo
 }
 
-build_package() {
-	echo " [>] Creating the final Slackware (.txz) package..."
-
-	local PLUGIN_NAME="nvidia-driver"
-	local PKG_TMP_DIR="${DATA_TMP}/${PLUGIN_NAME}_pkg_$(echo $RANDOM)"
-	local VERSION
-	VERSION=$(date +'%Y.%m.%d')
-	
-	mkdir -p "${PKG_TMP_DIR}/${VERSION}/install"
-	cp -R "${NV_TMP_D}/"* "${PKG_TMP_DIR}/${VERSION}/"
-
-	# Create the slack-desc file required for Slackware packages
-	cat > "${PKG_TMP_DIR}/${VERSION}/install/slack-desc" <<EOF
-|-----handy-ruler------------------------------------------------------|
-$PLUGIN_NAME: Nvidia custom driver package for Unraid
+package_building() {
+    echo " [>] Creating Slackware package..."
+    PLUGIN_NAME="nvidia-driver"
+    BASE_DIR="${NV_TMP_D}"
+    TMP_PKG_DIR="${DATA_TMP}/${PLUGIN_NAME}_$$"
+    VERSION="$(date +'%Y.%m.%d')"
+    mkdir -p "${TMP_PKG_DIR}/${VERSION}" || { echo "  [!] Error creating packaging directory."; exit 1; }
+    cd "${TMP_PKG_DIR}/${VERSION}" || { echo "  [!] Error entering packaging directory."; exit 1; }
+    cp -R "${BASE_DIR}/"* "${TMP_PKG_DIR}/${VERSION}/" || { echo "  [!] Error copying files into package directory."; exit 1; }
+    mkdir -p install
+    # Create Slackware package description
+    cat > install/slack-desc <<EOF
+           |-----handy-ruler------------------------------------------------------|
+$PLUGIN_NAME: $PLUGIN_NAME package for Unraid
 $PLUGIN_NAME:
-$PLUGIN_NAME: This package contains the proprietary Nvidia drivers, compiled
-$PLUGIN_NAME: specifically for Unraid kernel ${UNAME}.
+$PLUGIN_NAME: Contains:
+$PLUGIN_NAME:  - NVIDIA vGPU Driver v${NV_DRV_V}
+$PLUGIN_NAME:  - libnvidia-container v${LIBNVIDIA_CONTAINER_V}
+$PLUGIN_NAME:  - nvidia-container-toolkit v${CONTAINER_TOOLKIT_V}
 $PLUGIN_NAME:
-$PLUGIN_NAME: Nvidia Driver Version: ${NV_DRV_V}
-$PLUGIN_NAME: libnvidia-container: v${LIBNVIDIA_CONTAINER_V}
-$PLUGIN_NAME: nvidia-container-toolkit: v${CONTAINER_TOOLKIT_V}
-$PLUGIN_NAME:
-$PLUGIN_NAME: Built by the Unraid Nvidia Driver Tool on $(date)
+$PLUGIN_NAME: Custom $PLUGIN_NAME built for Unraid kernel ${UNAME%%-*} by user.
 $PLUGIN_NAME:
 EOF
-
-	local MAKEPKG_CMD
-	if command -v makepkg &>/dev/null; then
-		echo "  [i] 'makepkg' is already installed."
-		MAKEPKG_CMD="makepkg"
-	else
-		cat <<Q
-  [!] 'makepkg' command not found.
-  [i] It is required to create the .txz package.
-  [i] The script will now attempt to download and use it temporarily.
-Q
-		echo "  [>] Downloading Slackware pkgtools..."
-		wget -q -nc --show-progress --progress=bar:force:noscroll \
-			https://slackware.uk/slackware/slackware64-15.0/slackware64/a/pkgtools-15.0-noarch-42.txz \
-			-P "${DATA_TMP}" || { echo "   [!] Failed to download pkgtools."; exit 1; }
-		
-		tar -C "${DATA_TMP}" -xf "${DATA_TMP}/pkgtools"*.txz sbin/makepkg
-		MAKEPKG_CMD="${DATA_TMP}/sbin/makepkg"
-		chmod +x "$MAKEPKG_CMD"
-		if [[ ! -x "$MAKEPKG_CMD" ]]; then
-			echo "   [!] Failed to set up temporary 'makepkg'. Aborting."
-			exit 1
-		fi
-		echo "   [✓] 'makepkg' is ready for temporary use."
-	fi
-
-	echo "  [>] Building package (this may take a moment)..."
-	local PKG_FILENAME="${PLUGIN_NAME}-${NV_DRV_V}-${UNAME}-1.txz"
-	cd "${PKG_TMP_DIR}/${VERSION}" || exit 1
-	"${MAKEPKG_CMD}" -l n -c n "${DATA_DIR}/${PKG_FILENAME}" >>"${LOG_F}" 2>&1
-
-	# Verify package was created and move to 'out' directory
-	if [[ -f "${DATA_DIR}/${PKG_FILENAME}" ]]; then
-		mkdir -p "${DATA_DIR}/out"
-		mv "${DATA_DIR}/${PKG_FILENAME}" "${DATA_DIR}/out/"
-		md5sum "${DATA_DIR}/out/${PKG_FILENAME}" | awk '{print $1}' > "${DATA_DIR}/out/${PKG_FILENAME}.md5"
-		
-		echo ""
-		echo " [✓] SUCCESS! Your custom driver package is ready."
-		echo "   ----------------------------------------------------------------"
-		echo "   File:     out/${PKG_FILENAME}"
-		echo "   Size:     $(du -sh "${DATA_DIR}/out/${PKG_FILENAME}" | awk '{print $1}')"
-		echo "   MD5:      $(cat "${DATA_DIR}/out/${PKG_FILENAME}.md5")"
-		echo "   ----------------------------------------------------------------"
-		echo
-		echo -e '\a' # Beep
-	else
-		echo " [X] FAILED to create the package. Check the log file: ${LOG_F}"
-		exit 1
-	fi
+    # Determine if makepkg is available
+    MAKEPKG_CMD=""
+    if command -v makepkg > /dev/null 2>&1; then
+        echo " [*] 'makepkg' found, using system makepkg."
+        MAKEPKG_CMD="$(command -v makepkg)"
+    else
+        echo "  [!] 'makepkg' not found. Installing Slackware pkgtools temporarily..."
+        if ! ls "${DATA_TMP}"/pkgtools-*.txz >/dev/null 2>&1; then
+            echo "    [>] Downloading Slackware pkgtools..."
+            wget -q -nc --show-progress --progress=bar:force:noscroll -P "${DATA_TMP}" \
+                "https://slackware.uk/slackware/slackware64-15.0/slackware64/a/pkgtools-15.0-noarch-42.txz" \
+                || { echo "    [!] Error downloading pkgtools package. Please manually place pkgtools .txz in ${DATA_TMP}"; exit 1; }
+        fi
+        tar -C "${DATA_TMP}" -xf "${DATA_TMP}/pkgtools-"*.txz sbin/makepkg || { echo "    [!] Error extracting makepkg from pkgtools."; exit 1; }
+        MAKEPKG_CMD="${DATA_TMP}/sbin/makepkg"
+        if [[ ! -x "${MAKEPKG_CMD}" ]]; then
+            echo "    [!] makepkg is not available even after installation. Aborting."
+            exit 1
+        fi
+        echo "    [✓] 'makepkg' installed temporarily."
+    fi
+    echo "  [>] Building the package (this may take a while)..."
+    "${MAKEPKG_CMD}" -l n -c n "${TMP_PKG_DIR}/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz" >> "${LOG_F}" 2>&1 \
+        || { echo "  [!] makepkg failed to create the package. See ${LOG_F} for details."; exit 1; }
+    md5sum "${TMP_PKG_DIR}/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz" | awk '{print $1}' > "${TMP_PKG_DIR}/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz.md5"
+    echo "  [>] Creating output directory ${DATA_DIR}/out"
+    mkdir -p "${DATA_DIR}/out" && echo " [✓] Output directory ready."
+    echo "  [>] Copying package and checksum to output directory..."
+    cp "${TMP_PKG_DIR}/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz"* "${DATA_DIR}/out/" \
+        || { echo "  [!] Error copying final package to ${DATA_DIR}/out"; exit 1; }
+    echo ""
+    echo "   [i] Package created: ${DATA_DIR}/out/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz"
+    echo "   [i] MD5 checksum: $(cat "${DATA_DIR}/out/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz.md5")"
+    echo "   [i] Package size: $(du -h "${DATA_DIR}/out/${PLUGIN_NAME%%-*}-${NV_DRV_V}-${UNAME%/}-1.txz" | cut -f1)"
+    echo ""
+    echo " [✓] Package build complete."
+    echo -e '\a'
 }
 
-# --- Main Execution ---
-main() {
-	trap 'echo -e "\n[!] Script interrupted by user."; cleanup' INT
-
-	if [[ -z "${NV_RUN}" ]] || [[ -z "${UNRAID_DIR}" ]]; then
-		if [[ "${CLEANUP_END}" -eq 1 ]]; then
-			cleanup
-		else
-			usage
-			exit 1
-		fi
-	fi
-	
-	UNAME=$(basename "${UNRAID_DIR}" | sed 's/linux-//')
-	LNX_FULL_VER=$(echo "${UNAME}" | cut -d- -f1)
-	LNX_MAJ_NUMBER=$(echo "${LNX_FULL_VER}" | cut -d. -f1)
-
-	cat <<WEL
-
- [!] Welcome to the Nvidia driver packager for Unraid
- [!] This script will download, compile, and package software.
- [i] Unraid Kernel Target: ${UNAME}
- [i] Nvidia Driver Source: ${NV_RUN}
- [i] The process will start in 5 seconds...
-WEL
-	sleep 5
-
-	files_prepare
-
-	if [[ -z "${SKIP_KERNEL}" ]]; then
-		build_kernel
-	else
-		echo " [i] Skipping kernel build as requested."
-	fi
-
-	link_kernel_source
-	install_nvidia_driver
-	copy_extra_files
-	install_container_toolkit
-	build_package
-
-	if [[ "${CLEANUP_END}" -eq 1 ]]; then
-		cleanup
-	else
-		cat <<END
-	
-	[✓] Script finished successfully.
-	[i] The temporary build directory has been left for inspection at:
-	[i]   ${DATA_TMP}
-	[i] You can run the script with the '-c' flag to clean it up automatically.
-
-END
-	fi
-	exit 0
+# Helper to run commands and catch failures
+run_cmd() {
+    local cmd="$*"
+    local line_no=$BASH_LINENO
+    # Execute the command
+    eval "$cmd"
+    local status=$?
+    if [ $status -ne 0 ]; then
+        echo "[!] Command '${cmd}' failed with exit status $status at line $line_no"
+        exit $status
+    fi
 }
 
-usage() {
-	cat <<USAGE
+######### MAIN SCRIPT ##########
 
-Usage: sudo bash $(basename "$0") -n <NVIDIA.run> -u <UNRAID_SRC_DIR> [options]
-
-Required:
-  -n NVIDIA_INSTALLER.run   Path to the Nvidia .run installer file.
-  -u UNRAID_SOURCE_DIR      Path to the Unraid kernel source directory (e.g., 'linux-6.1.64-Unraid').
-
-Options:
-  -s                        Skip the kernel build step. Use only if the kernel has already
-                            been successfully built in the 'tmp' directory from a previous run.
-  -c                        Cleanup the 'tmp' directory after the script finishes (or if run alone).
-  -h                        Display this help message.
-
-Example:
-  sudo bash $(basename "$0") -n NVIDIA-Linux-x86_64-535.129.03-grid.run -u linux-6.1.64-Unraid
-
-USAGE
-}
-
-# --- Script Entry Point ---
-if [ "$(id -u)" -ne 0 ]; then
-	cat <<R
-
-  [!] This script must be run as root.
-  [i] Please use: sudo bash $(basename "$0") [flags]
+# Ensure script is run as root
+if [[ $(id -u) -ne 0 ]]; then
+    cat <<EOF
+  [!] Not running as root.
+  [i] Please run this script as root (e.g., with sudo).
   [i] Exiting...
-
-R
-	exit 1
+EOF
+    exit 1
 fi
 
-while getopts 'n:u:sch' OPTION; do
-	case "$OPTION" in
-		n) NV_RUN="$OPTARG" ;;
-		u) UNRAID_DIR="$OPTARG" ;;
-		s) SKIP_KERNEL=1 ;;
-		c) CLEANUP_END=1 ;;
-		h) usage; exit 0 ;;
-		?) usage; exit 1 ;;
-	esac
+# Initialize variables
+DATA_DIR=$(pwd)
+DATA_TMP="${DATA_DIR}/tmp"
+NV_TMP_D="${DATA_TMP}/NVIDIA"
+LOG_F="${DATA_DIR}/logfile_$(date +'%Y.%m.%d')_$RANDOM.log"
+CPU_COUNT=$(nproc)
+LIBNVIDIA_CONTAINER_V="1.14.3"
+CONTAINER_TOOLKIT_V="1.14.3"
+CLEANUP_END=0
+SKIP_KERNEL=
+
+# Parse options
+while getopts 'n:u:shc' OPTION; do
+    case "$OPTION" in
+        n)
+            NV_RUN="$OPTARG"
+            echo " [i] NVIDIA driver package: ${NV_RUN}"
+            ;;
+        u)
+            UNRAID_DIR="$OPTARG"
+            echo " [i] Unraid source folder: ${UNRAID_DIR}"
+            ;;
+        s)
+            SKIP_KERNEL=1
+            echo " [i] Skipping kernel build (assuming kernel already built)."
+            ;;
+        h)
+            cat <<EOF
+
+ [i] Usage: sudo bash $(basename "$0") -u <Unraid_source_folder> -n <NVIDIA_driver.run> [options]
+
+ [i] Options:
+    -s    Skip kernel build step (if kernel source is already compiled)
+    -c    Clean up temporary files after build (or run standalone to just clean up)
+    -h    Show this help message
+
+EOF
+            exit 0
+            ;;
+        c)
+            CLEANUP_END=1
+            echo " [i] Will clean up temporary files after script completes."
+            ;;
+        ?)
+            echo -e "\n [!] Usage: sudo bash $(basename "$0") -n <NVIDIA_driver.run> -u <Unraid_source_folder> [options]\n"
+            exit 1
+            ;;
+    esac
 done
 
-# Run the main logic
-main
+# Ensure mandatory arguments are provided (-n and -u)
+if [[ -z "${NV_RUN}" || -z "${UNRAID_DIR}" ]]; then
+    if [[ "${CLEANUP_END}" == "1" && -z "${NV_RUN}" && -z "${UNRAID_DIR}" ]]; then
+        # If only -c was provided (no -n or -u), perform cleanup
+        cleanup
+    else
+        echo -e "\n [!] Error: -u and -n options are required to run the build.\n"
+        echo " [i] Usage: sudo bash $(basename "$0") -u <Unraid_source_folder> -n <NVIDIA_driver.run> [options]"
+        echo " [i] Try '$(basename "$0") -h' for more information."
+        exit 1
+    fi
+fi
+
+# Begin main execution
+cat <<WEL
+
+ [!] Welcome to the Unraid NVIDIA vGPU Driver Packager
+ [!] Note: Tested with NVIDIA vGPU driver versions 525.85 and 525.105 on Unraid 6.12.x.
+ [!] Starting in 3 seconds... (Press Ctrl+C to cancel)
+
+WEL
+sleep 3
+
+# Derive kernel version details from Unraid source folder name
+UNAME=$(echo "${UNRAID_DIR}" | sed 's/linux-//')
+LNX_MAJ_NUMBER=$(echo "${UNAME%/}" | cut -d "." -f1)
+LNX_FULL_VER=$(echo "${UNAME%/}" | cut -d "-" -f1)
+
+# Execute the main build steps
+run_cmd files_prepare
+if [[ -z "${SKIP_KERNEL}" ]]; then
+    run_cmd build_kernel
+fi
+run_cmd link_sauce
+run_cmd nv_inst
+# Copying supplementary files is non-critical, so we don't use run_cmd (just log warnings if any)
+copy_files
+run_cmd libnvidia_inst
+run_cmd package_building
+
+# If -c was specified, auto-clean the temporary files
+if [[ "${CLEANUP_END}" == "1" ]]; then
+    cleanup
+fi
+
+echo -e "\n [i] Script completed successfully."
+exit 0
